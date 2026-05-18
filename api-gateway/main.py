@@ -1,35 +1,54 @@
-# api-gateway/main.py
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException
 from prometheus_fastapi_instrumentator import Instrumentator
-import httpx, os, time, langsmith
+from pydantic import BaseModel, Field
+import httpx
+import os
+import time
 
 app = FastAPI(title="AI Platform API Gateway")
-Instrumentator().instrument(app).expose(app)  # Integration 9: Prometheus
+Instrumentator().instrument(app).expose(app)
 
 VLLM_URL = os.environ["VLLM_URL"]
+VLLM_MODEL = os.environ.get("VLLM_MODEL", "distilgpt2")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
+NGROK_HEADERS = {"ngrok-skip-browser-warning": "true"}
+
+
+class ChatRequest(BaseModel):
+    query: str = Field(..., min_length=1)
+    embedding: list[float] = Field(default_factory=lambda: [0.0] * 384)
+
 
 @app.post("/api/v1/chat")
-async def chat(request: Request):
-    body = await request.json()
-    query = body["query"]
+async def chat(body: ChatRequest):
     start = time.time()
+    context = []
 
-    # 1. Vector search
-    async with httpx.AsyncClient() as client:
-        search_resp = await client.post(f"{QDRANT_URL}/collections/documents/points/search", json={
-            "vector": body.get("embedding", [0.0] * 384),
-            "limit": 3
-        })
-        context = search_resp.json().get("result", [])
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            search_resp = await client.post(
+                f"{QDRANT_URL}/collections/documents/points/search",
+                json={"vector": body.embedding, "limit": 3},
+            )
+            if search_resp.status_code == 200:
+                context = search_resp.json().get("result", [])
+    except httpx.HTTPError:
+        context = []
 
-    # 2. LLM inference
-    prompt = f"Context: {context}\n\nQuery: {query}"
-    async with httpx.AsyncClient(timeout=30) as client:
-        llm_resp = await client.post(f"{VLLM_URL}/v1/chat/completions", json={
-            "model": "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4",
-            "messages": [{"role": "user", "content": prompt}]
-        })
+    prompt = f"Context: {context}\n\nQuery: {body.query}"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            llm_resp = await client.post(
+                f"{VLLM_URL}/v1/chat/completions",
+                headers=NGROK_HEADERS,
+                json={
+                    "model": VLLM_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            llm_resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail=f"LLM service unavailable: {exc}") from exc
 
     latency = (time.time() - start) * 1000
     result = llm_resp.json()
@@ -37,8 +56,9 @@ async def chat(request: Request):
     return {
         "answer": result["choices"][0]["message"]["content"],
         "latency_ms": round(latency, 2),
-        "model": result["model"]
+        "model": result["model"],
     }
+
 
 @app.get("/health")
 def health():

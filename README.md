@@ -181,3 +181,13 @@ Xem `SUBMISSION.md` ở thư mục gốc project.
 ## License
 
 Edu
+
+## Kaggle/ngrok Serving Notes
+
+This repo is configured to use real Kaggle/ngrok serving only. Set `VLLM_NGROK_URL` and `EMBED_NGROK_URL` before `docker compose up -d --build`.
+
+The Kaggle notebook to upload is in `kaggle-lab28/`. It starts vLLM on port `8001`, an embedding service on port `8002`, exposes both with ngrok, and prints the two URLs needed locally.
+
+Grafana is provisioned automatically with a Prometheus datasource and the `Lab28 AI Platform Observability` dashboard.
+
+Verification screenshots and captured command outputs are in `screenshots/`. See `LAB28_RESULTS.md` for the exact commands and summary.
